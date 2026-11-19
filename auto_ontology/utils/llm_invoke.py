@@ -148,6 +148,7 @@ _RETRYABLE_TOKENS = (
     "timed out",
     "APITimeoutError",
     "ReadTimeout",
+    "DEGRADED",
     # Azure / LiteLLM connection failures
     "Connection error",
     "APIConnectionError",
@@ -211,6 +212,30 @@ _NON_REASONING_MODEL_NAME = resolve("NON_REASONING", "MODEL")
 _NON_REASONING_API_KEY = resolve("NON_REASONING", "API_KEY")
 
 
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FIXED_TEMPERATURE_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _use_openai_client(model: str) -> bool:
+    """判断是否应通过标准 OpenAI 协议客户端（ChatOpenAI）调用模型。
+
+    当模型自带 OpenAI/Azure/AWS 前缀，或显式开启 LLM_USE_OPENAI_CLIENT 时启用，
+    用以规避 ChatNVIDIA 对部分托管模型发送不兼容 guided_json 字段的问题。
+    """
+    if model.startswith(("openai/", "azure/", "aws/")):
+        return True
+    return (
+        os.environ.get("LLM_USE_OPENAI_CLIENT", "").strip().lower()
+        in _TRUTHY_ENV_VALUES
+    )
+
+
+def _supports_explicit_temperature(model: str) -> bool:
+    """判断模型是否允许显式传入 temperature 参数（gpt-5/o 系列仅接受默认值）。"""
+    leaf = model.rsplit("/", 1)[-1].lower()
+    return not leaf.startswith(_FIXED_TEMPERATURE_MODEL_PREFIXES)
+
+
 def _build_client(
     *,
     model: str,
@@ -223,23 +248,33 @@ def _build_client(
 
     OpenAI-family models (``openai/``, ``azure/``, ``aws/`` prefixes) go through
     ``ChatOpenAI``, which supports structured output. Everything else uses
-    ``ChatNVIDIA``.
+    ``ChatNVIDIA`` unless ``LLM_USE_OPENAI_CLIENT`` is enabled.
     """
-    if model.startswith(("openai/", "azure/", "aws/")):
+    if _use_openai_client(model):
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            # temperature omitted: gpt-5.x/o-series reject any explicit value and
-            # only allow the server default (1). Unset => langchain sends no
-            # temperature field, so the provider default applies.
-            # temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=LLM_INVOKE_TIMEOUT_S,
-            max_retries=0,
-        )
+        openai_kwargs: dict[str, object] = {
+            "model": model,
+            "api_key": api_key,
+            "base_url": base_url,
+            "max_tokens": max_tokens,
+            "timeout": LLM_INVOKE_TIMEOUT_S,
+            "max_retries": 0,
+        }
+        # gpt-5.x/o-series 拒绝显式 temperature；其余 OpenAI 兼容模型按调用方要求透传
+        if _supports_explicit_temperature(model):
+            openai_kwargs["temperature"] = temperature
+
+        reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "").strip()
+        if reasoning_effort:
+            openai_kwargs["reasoning_effort"] = reasoning_effort
+
+        enable_thinking = os.environ.get("LLM_ENABLE_THINKING", "").strip().lower()
+        if enable_thinking in ("0", "false", "no", "off"):
+            openai_kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = {
+                "enable_thinking": False
+            }
+        return ChatOpenAI(**openai_kwargs)
 
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
@@ -474,6 +509,10 @@ def _structured_output_kwargs(llm: BaseChatModel) -> dict:
     """
     if _is_claude(llm):
         return {"method": "function_calling", "tool_choice": None}
+    # 允许通过环境变量指定结构化输出协议（例如 function_calling），以兼容不接受 guided_json 或默认 json_schema 易发散的兼容端点
+    method = os.environ.get("LLM_STRUCTURED_OUTPUT_METHOD", "").strip()
+    if method:
+        return {"method": method}
     return {}
 
 

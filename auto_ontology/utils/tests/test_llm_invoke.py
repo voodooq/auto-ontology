@@ -497,3 +497,61 @@ def test_missing_reasoning_client_keeps_the_original_failure(monkeypatch: Any) -
     monkeypatch.setattr(llm_invoke, "get_llm_client", unavailable)
 
     assert llm_invoke.invoke_with_structured_output(primary, [], _Schema) is None
+
+
+def test_structured_output_method_env_applies_to_non_claude_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 Claude 模型在配置 LLM_STRUCTURED_OUTPUT_METHOD 后应透传对应 method。"""
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_METHOD", "function_calling")
+
+    assert _structured_output_kwargs(_Model("nvidia/nemotron-3.5-lightning-30b-a3b")) == {
+        "method": "function_calling"
+    }
+    # Claude 仍保留原有的 tool_choice=None 逻辑
+    assert _structured_output_kwargs(_Model("aws/anthropic/bedrock-claude-opus-4-8")) == {
+        "method": "function_calling",
+        "tool_choice": None,
+    }
+
+
+def test_use_openai_client_env_and_temperature_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """开启 LLM_USE_OPENAI_CLIENT 后，任意模型均切到 ChatOpenAI 并正确区分 temperature 支持。"""
+    assert not llm_invoke._use_openai_client("nvidia/nemotron-3.5-lightning-30b-a3b")
+    assert llm_invoke._use_openai_client("openai/gpt-5")
+
+    monkeypatch.setenv("LLM_USE_OPENAI_CLIENT", "true")
+    assert llm_invoke._use_openai_client("nvidia/nemotron-3.5-lightning-30b-a3b")
+    assert llm_invoke._supports_explicit_temperature("nvidia/nemotron-3.5-lightning-30b-a3b")
+    assert not llm_invoke._supports_explicit_temperature("openai/gpt-5")
+    assert not llm_invoke._supports_explicit_temperature("o3-mini")
+
+
+def test_openai_client_reasoning_effort_and_thinking_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ChatOpenAI 模式下支持透传 reasoning_effort 与关闭 thinking。"""
+    captured: dict[str, Any] = {}
+
+    class DummyChatOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", DummyChatOpenAI)
+    monkeypatch.setenv("LLM_USE_OPENAI_CLIENT", "true")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "low")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+
+    llm_invoke._build_client(
+        model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        api_key="nvapi-test",
+        base_url="https://test.api",
+        temperature=0.0,
+        max_tokens=2048,
+    )
+
+    assert captured["reasoning_effort"] == "low"
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert "DEGRADED" in llm_invoke._RETRYABLE_TOKENS
