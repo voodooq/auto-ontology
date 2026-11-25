@@ -40,6 +40,9 @@ class ToolContext:
     ``pages`` holds the ``run_sql`` results too long to show, for ``grep`` to
     search; page *n* is ``pages[n - 1]``.
 
+    ``submitted_database`` is the database the accepted submission was written
+    for, whether it ran or was accepted unrun for lack of budget.
+
     ``shown_tables`` is every table a ``retrieve`` result named — in a table
     block, a JOIN route, a SIMILAR line or a definition's SQL — as lowercased
     ``(schema, name)``. It is wider than ``seen_tables`` on purpose: a bridge
@@ -72,11 +75,11 @@ class ToolContext:
     prediction_llm: Any = None
     custom_prompts: str = ""
     seen_tables: dict[str, dict[str, Any]] = field(default_factory=dict)
+    submitted_database: str | None = None
     joined_pairs: set[frozenset[str]] = field(default_factory=set)
     join_paths: list[dict[str, Any]] = field(default_factory=list)
     anchor_column_ids: dict[str, str | None] = field(default_factory=dict)
     sibling_pairs: set[frozenset[str]] = field(default_factory=set)
-    shown_concepts: set[str] = field(default_factory=set)
     catalog_tables: list[dict[str, Any]] | None = None
     row_counts: dict[str, int | None] = field(default_factory=dict)
     counts_left: int = 0
